@@ -1,0 +1,318 @@
+---
+title: "Fault prediction in semi-conductor manufacturing process"
+author: "Menasria Hafidh"
+date: "13 février 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+A complex modern **semi-conductor manufacturing process** is normally under consistent surveillance via the monitoring of signals/variables collected from sensors and or process measurement points. The datesets are donated in *2008-11-19* and can be obtained from <http://archive.ics.uci.edu/ml/machine-learning-databases/secom/>.
+Data descreption: it consists of two files one is *secom.csv* and *secom_labels.csv*.
+
+- *1567* data points or measurements.
+- *590* variabels, one label *1* for fail and *-1* for pass and variable for the time points beimg measured.
+
+Analysis process:
+
+- Reduce the number of features and obtain the most relevent variables that affect the fault.
+
+- Develope a *classification model* to detect that occurance of a *faul*.
+
+- Develope another *classification model* to *predict* the *fault* within **1 hour**.
+
+# Preparation {.tabset .tabset-fade .tabset-pills}
+
+## Loading packages
+```{r cars, echo=TRUE,message=FALSE,warning= FALSE}
+library(caret) #model building
+library(ggcorrplot) #visualisation
+library(FSelector)  #feature selection
+library(kernlab)
+library(gbm)
+
+
+```
+
+## Loading data
+```{r, message=FALSE,warning=FALSE}
+setwd("E:/Data analysis/FYP/project")
+labels <- read.table("secom_labels.data",dec = " ")
+data <- read.table("secom.data",dec = " ",sep = " ")
+
+```
+
+## shift function
+The shift function is used to create *lagged* input features since we are dealing with *time series signal*
+```{r,message=FALSE,warning=FALSE}
+shift<-function(x,shift_by){ 
+  stopifnot(is.numeric(x))
+  stopifnot(is.numeric(shift_by))
+  if(length(shift_by)>1)
+    sapply(shift_by,x=x,shift)
+  shift_by_abs <- abs(shift_by)
+  
+    if (shift_by>0)
+      out <- c(tail(x,-shift_by_abs),rep(NA,shift_by_abs))
+    else if(shift_by<0)
+      out <- c(rep(NA,shift_by_abs),head(x,-shift_by_abs))
+  else
+    out <- x
+  out
+}
+
+```
+
+## fault_time function
+this function is used to add another outcom variable that tells wether a fault will happen after a sertain time  
+```{r}
+fault_time <- function(x,time){
+  
+  v <- 0
+  
+  n <- nrow(x)
+  for(i in 1:(n-10)){
+    bool <- FALSE
+      for(j in (i+1):(i+10)){
+
+    m <-  (as.numeric(x$V2[j]) - as.numeric(labels$V2[i]))/60
+    if(x[j,1] > 0)
+      bool <- TRUE
+    
+          if(m>time ){
+      if(bool)
+        v[i] <- 1
+      else
+        v[i] <- -1
+      break()    
+        }
+    }
+  }
+  v <- c(v,rep(NA,10))
+  return(v)
+}
+
+```
+
+# Data cleaning
+Removing variables with *missing* values and near-zero-variance
+
+## missing values
+removing variables that have high correlation with other variables
+```{r,message=FALSE,warning=FALSE}
+dim(data)
+missing <- sapply(data,function(x) any(is.na(x)))
+sum(missing)
+names <- names(missing[!missing]) 
+data_no_m <- data[,names]
+dim(data_no_m)
+
+```
+the data contains *124* with missing values.
+
+## near zero variance
+variables that does not vary too much or have single values are removed
+```{r pressure, echo=TRUE}
+nzv <- nearZeroVar(data_no_m,saveMetrics = T)
+names <- row.names(nzv[!nzv$nzv,])
+data_no_nzv <- data_no_m[,names]
+dim(data_no_nzv)
+```
+*9* columns with **near-zero-variance** are removed. 
+
+## Converting data into numerical
+```{r,message=FALSE,warning=FALSE}
+data_numeric <- sapply(data_no_nzv,function(x){x<-as.numeric(x)})
+data_numeric <- data.frame(data_numeric)
+head(str(data_numeric),10)
+```
+
+##  Generating lagged input features
+generating **_t-1_**,..,**_t-5_** of all variables as lagged inputs
+```{r,message=FALSE,warning=FALSE}
+data_lag <- data_numeric
+names <- names(data_numeric)
+
+for(i in 1:5){
+     for(j in 1:length(data_numeric)){
+       name <- paste(names[j],"lag",i,sep = "_")
+       names <- c(names,name)
+       data_lag$name <- shift(data_numeric[,j],-i)
+       names(data_lag) <- names
+     }
+}
+data_lag <- na.omit(data_lag)
+dim(data_lag)
+
+
+```
+
+## Add predicted fault as a label
+```{r}
+labels$V2 <- as.POSIXlt(as.character(labels$V2), format="%d/%m/%Y %H:%M:%S")
+labels$v1_1_hour <-fault_time(labels,60)
+labels <- na.omit(labels)
+data_lag <- data_lag[1:(nrow(data_lag)-10),]
+labels  <- labels[-c(1:5),]
+
+```
+
+## Generate min, hour, day and  month features
+```{r}
+labels$min <- labels$V2$min
+labels$hour <- labels$V2$hour
+labels$day <- labels$V2$mday
+labels$month <- labels$V2$mon
+```
+
+# Data reduction
+
+## Correlation 
+variables that are highly correlated to each other are selected and removed using the caret package.
+```{r}
+preProces <- preProcess(data_lag,method = "corr",cutoff = 0.75)
+data_lag_nzc <- predict(preProces,newdata = data_lag)
+dim(data_lag_nzc)
+```
+## chi-square test
+Use of chi-square test to calculate variable importance after balancing the data with respect to the class.
+```{r}
+data <- data_lag_nzc
+data$class <- as.factor(labels$V1)
+data <- upSample( x = data[,-ncol(data)],y = data$class)
+table(data$Class)
+weights<- chi.squared(Class~., data)
+subset <- cutoff.k(weights,800) ## 400
+subset <- c(subset,"Class")
+data <- data[,subset]
+
+```
+selecting 800 variables.
+
+## Variable importance using gbm model
+build a gbm model and calculating variable importance.
+```{r,message=FALSE,warning=FALSE}
+set.seed(0)
+intrain <- createDataPartition(data$Class,p=0.7,list = F)
+train <- data[intrain,]
+test <- data[-intrain,]
+gbmCntrl <- trainControl(method = "cv",number = 10,verboseIter=FALSE)
+gbmFit   <- train(Class~.,data=train,method = "gbm",trControl = gbmCntrl,verbose = FALSE)
+p <- predict(gbmFit,newdata = test)
+confusionMatrix(p,test$Class)
+vImp <- varImp(gbmFit,numTrees =150)
+variables <- names(train[,-length(train)])
+variables <- variables[which(vImp$importance>0)]
+data <- data_lag_nzc[,c(variables)]
+length(variables)
+```
+*231* variables with lagged inputs have been selected.
+
+## Principal component analysis
+PCA is used to get projected data with the most variance retained as a dimensionality reduction process.
+```{r}
+preP <- preProcess(data,method = "pca",pcaComp = 60)
+pc <- predict(preP,newdata = data)
+length(pc)
+```
+data has been reduced to *60*
+
+## Add time and lagged fault to data
+```{r}
+pc$min <- labels$min
+pc$hour <- labels$hour
+pc$day <- labels$day
+pc$month <- labels$month
+```
+
+# Model building
+
+## Detect fault
+ensembling method will be used, combining classifiers by
+voting to improve accuracy
+```{r,message=FALSE,warning=FALSE}
+ensamble <- function(){
+trContrl = trainControl(method="cv",number=3,verboseIter=FALSE)
+svm.fit <- train(Class ~.,method="svmRadial",data=training,trControl=trContrl)
+nnet.fit <- train(Class ~.,method="nnet",data=training,trControl=trContrl,verbose= FALSE)
+knn.fit <- train(Class ~.,method="knn",data=training,trControl=trContrl)
+rf.fit <- train(Class ~.,method="rf",data=training,trControl=trContrl)
+xgboost.fit <- train(Class ~.,method="xgbTree",data=training,trControl=trContrl)
+glm.fit <- train(Class ~.,method="glm",data=training,trControl=trContrl)
+
+
+
+svm.pred.test <- predict(svm.fit,testing)
+nnet.pred.test <- predict(nnet.fit,testing)
+xgboost.pred.test <- predict(xgboost.fit,testing)
+knn.pred.test <- predict(knn.fit,testing)
+glm.pred.test <- predict(glm.fit,testing)
+rf.pred.test <- predict(rf.fit,testing)
+resamps <<- resamples(list(GLM = glm.fit,
+                          SVM = svm.fit,
+                          NNET = nnet.fit,
+                          KNN = knn.fit,
+                          XGB = xgboost.fit,
+                          RF  = rf.fit))
+theme1 <- trellis.par.get()
+theme1$plot.symbol$col = rgb(.2, .2, .2, .4)
+theme1$plot.symbol$pch = 16
+theme1$plot.line$col = rgb(1, 0, 0, .7)
+theme1$plot.line$lwd <- 2
+trellis.par.set(theme1)
+print(bwplot(resamps, layout = c(3, 1)))
+trellis.par.set(caretTheme())
+
+
+confusionMatrix(xgboost.pred.test,testing$Class)
+
+combinedTestData <- data.frame(svm.pred=svm.pred.test,
+nnet.pred = nnet.pred.test,xgboost.pred=xgboost.pred.test,knn.pred=knn.pred.test,glm.pred = glm.pred.test,rf.pred = rf.pred.test,Class=testing$Class)
+
+comb.fit <- train(Class ~.,method="gbm",data=combinedTestData,trControl = trainControl(method = "cv",number = 3,verboseIter=FALSE),verbose = FALSE)
+# use the resultant model to predict on the test set
+comb.pred.test <- predict(comb.fit, combinedTestData)
+# use the glm and rf models to predict results on the validation data set
+
+svm.pred.val <- predict(svm.fit,validation)
+nnet.pred.val <- predict(nnet.fit,validation)
+xgboost.pred.val <- predict(xgboost.fit,validation)
+knn.pred.val <- predict(knn.fit,validation)
+glm.pred.val <- predict(glm.fit,validation)
+rf.pred.val <- predict(rf.fit,validation)# combine the results into data frame for the comb.fit
+combinedValData <- data.frame(svm.pred=svm.pred.val,
+nnet.pred = nnet.pred.val,xgboost.pred=xgboost.pred.val,knn.pred=knn.pred.val,glm.pred = glm.pred.val,rf.pred = rf.pred.val,Class=validation$Class)
+# run the comb.fit on the combined validation data
+comb.pred.val <- predict(comb.fit,combinedValData)
+print(confusionMatrix(comb.pred.val,validation$Class))
+}
+```
+## detect faults
+```{r,message=FALSE,warning=FALSE}
+pc1 <- pc
+pc$out <- as.factor(labels$V1)
+pc <- upSample( x = pc[,-ncol(pc)],y = pc$out)
+intrain <- createDataPartition(pc$Class,p=0.7,list = F)
+buildData <- pc[intrain,]
+validation <- pc[-intrain,]
+inTrain <- createDataPartition(y=buildData$Class,p=0.7, list=FALSE)
+training <- buildData[inTrain,]; testing <- buildData[-inTrain,]
+ensamble()
+
+```
+## predict faults with in an hour
+```{r,message=FALSE,warning=FALSE}
+pc <- pc1
+pc$out <- as.factor(labels$v1_1_hour)
+pc <- upSample( x = pc[,-ncol(pc)],y = pc$out)
+intrain <- createDataPartition(pc$Class,p=0.7,list = F)
+buildData <- pc[intrain,]
+validation <- pc[-intrain,]
+inTrain <- createDataPartition(y=buildData$Class,p=0.7, list=FALSE)
+training <- buildData[inTrain,]; testing <- buildData[-inTrain,]
+ensamble()
+```
